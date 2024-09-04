@@ -1,97 +1,108 @@
 import torch
+from torch.utils.data import DataLoader, random_split
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
 import numpy as np
 import cv2
-import matplotlib.pyplot as plt
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-from torchinfo import summary
 from dataset_create import LinePlotDataset
-from model import CNNLSTMModel
+from model import ModifiedCNNModel 
 
-# Check if CUDA is available and set the device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
-# Data Augmentation
-transform = A.Compose([
-    A.Resize(100, 100),
-    A.RandomRotate90(),
-    A.Flip(),
-    A.RandomBrightnessContrast(),
-    A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
-    ToTensorV2(),
-])
-
-dataset = LinePlotDataset(transform=transform)
-dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
-
-# Instantiate the model and move it to the GPU
-model = CNNLSTMModel().to(device)
-
-print(summary(model,input_size=(1, 3, 100, 100)))
-# Step 4: Training Setup
-criterion = nn.MSELoss().to(device)
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-# Step 5: Model Training
-num_epochs = 20
-for epoch in range(num_epochs):
-    for images, coords in dataloader:
+# Function to train the model
+def train_model(model, train_loader, eval_loader, criterion, optimizer, num_epochs=10, device='cpu'):
+    model.to(device)  # Transfer model to the specified device (GPU/CPU)
+    for epoch in range(num_epochs):
+        model.train()  # Set model to training mode
+        running_loss = 0.0
+        for images, true_coords in train_loader:
+            images, true_coords = images.to(device), true_coords.to(device)  # Transfer data to the device
+            optimizer.zero_grad()
+            
+            # Forward pass
+            outputs = model(images.float())  # Convert images to float
+            loss = criterion(outputs, true_coords)
+            
+            # Backward pass and optimization
+            loss.backward()
+            optimizer.step()
+            
+            running_loss += loss.item()
         
-        # Move inputs and targets to the GPU
-        images = images.to(device)
-        coords = coords.to(device)
+        # Calculate average loss over the epoch
+        avg_train_loss = running_loss / len(train_loader)
+        
+        # Evaluate the model
+        eval_loss = evaluate_model(model, eval_loader, criterion, device)
+        
+        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Eval Loss: {eval_loss:.4f}")
 
-        # Forward pass
-        optimizer.zero_grad()
-        outputs = model(images)
-
-        # Compute loss
-        loss = criterion(outputs, coords)
-
-        # Backward pass and optimization
-        loss.backward()
-        optimizer.step()
-
-    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
-
-# Step 6: Inference with Post-processing
-def preprocess_image(img):
-    # Standardize to expected input format (BGR to RGB if using PyTorch)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Ensure color channels are in RGB order
-    img = cv2.resize(img, (100, 100))  # Resize to model's expected input size
-    img = img / 255.0  # Normalize pixel values to [0, 1]
-    return img
-
-def predict_coordinates(model, img):
-    img = preprocess_image(img)
+# Function to evaluate the model
+def evaluate_model(model, eval_loader, criterion, device='cpu'):
+    model.eval()  # Set model to evaluation mode
+    eval_loss = 0.0
+    with torch.no_grad():  # Disable gradient calculation
+        for images, true_coords in eval_loader:
+            images, true_coords = images.to(device), true_coords.to(device)  # Transfer data to the device
+            outputs = model(images.float())
+            loss = criterion(outputs, true_coords)
+            eval_loss += loss.item()
     
-    # Convert image to tensor and move to GPU
-    img = torch.tensor(img).permute(2, 0, 1).unsqueeze(0).float().to(device)  # Prepare for model (1, 3, 100, 100)
-    
-    # Ensure the model is in evaluation mode
-    model.eval()
-    
-    # Perform inference
+    avg_eval_loss = eval_loss / len(eval_loader)
+    return avg_eval_loss
+
+def draw_coordinates(image, coords, color, thickness=1):
+    """
+    Draws lines between coordinates on the image.
+    :param image: The image to draw on.
+    :param coords: The coordinates to draw, shape [num_points, 2].
+    :param color: The color of the lines (B, G, R).
+    :param thickness: The thickness of the lines.
+    """
+    points = np.array([list(map(int, p)) for p in coords])
+    for i in range(len(points) - 1):
+        cv2.line(image, tuple(points[i]), tuple(points[i + 1]), color, thickness)
+
+def test_model(model, dataset, device='cpu', save_path='output.png'):
+    model.eval()  # Set model to evaluation mode
     with torch.no_grad():
-        pred = model(img)
-    
-    # Move the prediction back to the CPU and convert to numpy
-    pred_coords = pred.cpu().squeeze(0).numpy()
-    return pred_coords
+        image, true_coords = dataset[0]  # Test on the first example
+        image_tensor = torch.tensor(image).unsqueeze(0).float().to(device)  # Add batch dimension, convert to float, and transfer to device
+        output = model(image_tensor)
+        predicted_coords = output.squeeze().cpu().numpy()  # Transfer to CPU and convert to numpy
+        
+        # Convert image back to original format for OpenCV (HWC)
+        # image = np.transpose(image, (1, 2, 0))
+        image = np.ones((100, 100, 3), dtype=np.uint8) * 255  # White background
 
-# Testing with a sample image
-sample_image, _ = dataset[0]  # Get the first sample image and its coordinates
-predicted_coords = predict_coordinates(model, sample_image.numpy().transpose(1, 2, 0))
+        # Draw the true coordinates in green
+        draw_coordinates(image, true_coords, color=(0, 255, 0))
+        
+        # Draw the predicted coordinates in red
+        draw_coordinates(image, predicted_coords, color=(0, 0, 255))
+        
+        # Save the image with the drawn coordinates
+        cv2.imwrite(save_path, image)
+        
+        print(f"Image saved to {save_path}")
+        print("True Coordinates:", true_coords)
+        print("Predicted Coordinates:", predicted_coords)
 
-# Visualization
-plt.imshow(sample_image.numpy().transpose(1, 2, 0))
-print(predicted_coords)
+dataset = LinePlotDataset(num_samples=1000)
+train_size = int(0.8 * len(dataset))
+eval_size = len(dataset) - train_size
+train_dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
 
-plt.scatter(predicted_coords[:, 0], predicted_coords[:, 1], color='red')
-plt.savefig('/home/ec2-user/aniket/Datapoint/predicted_coordinates.png', bbox_inches='tight')
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+eval_loader = DataLoader(eval_dataset, batch_size=16, shuffle=False)
 
-plt.show()
+# Determine if GPU is available and set device accordingly
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Model, Loss, and Optimizer setup
+model = ModifiedCNNModel()
+criterion = nn.MSELoss()  # Mean Squared Error Loss
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+# Training the model with 10 epochs (example)
+train_model(model, train_loader, eval_loader, criterion, optimizer, num_epochs=50, device=device)
+
+# Test the model on a single example from the dataset
+test_model(model, dataset, device=device, save_path='output.png')
