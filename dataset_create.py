@@ -12,8 +12,8 @@ class LinePlotDataset(Dataset):
         coordinates = []
         for _ in range(num_samples):
             img = np.ones((100, 100, 3), dtype=np.uint8) * 255  # White background
-            x = np.linspace(10, 90, 25)  # More points for a smoother line
-            y = np.random.uniform(10, 90, size=25)
+            x = np.linspace(10, 90, 30)  # 30 points for the line
+            y = np.random.uniform(10, 90, size=30)
             coordinates.append(np.vstack((x, y)).T)
 
             # Draw the line with consistent color and width
@@ -35,4 +35,8 @@ class LinePlotDataset(Dataset):
             augmented = self.transform(image=image)
             image = augmented['image']
 
+        # Convert from HWC to CHW format
+        image = np.transpose(image, (2, 0, 1))
+
         return image, coords
+
